@@ -1,0 +1,841 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pressione & Benessere</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>❤️</text></svg>">
+<style>
+  html, body { margin: 0; padding: 0; background: #f4f6f3; }
+  #root { min-height: 100vh; }
+  #loader { display:flex; align-items:center; justify-content:center; height:100vh; font-family:system-ui,sans-serif; color:#5e6b62; }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prop-types/15.8.1/prop-types.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/recharts/2.12.7/Recharts.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js" crossorigin></script>
+</head>
+<body>
+<div id="root"><div id="loader">Caricamento…</div></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useCallback } = React;
+const {
+  ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
+  ReferenceArea, ReferenceLine, ComposedChart, Bar, Area, BarChart,
+} = Recharts;
+
+
+
+/* ============================================================
+   PROFILO PAZIENTE
+   ============================================================ */
+const PROFILE = {
+  nome: "Paziente",
+  sesso: "M",
+  nascita: "1963-05",
+  altezzaCm: 175,
+};
+const eta = () => {
+  const [y, m] = PROFILE.nascita.split("-").map(Number);
+  const now = new Date();
+  let a = now.getFullYear() - y;
+  if (now.getMonth() + 1 < m) a--;
+  return a;
+};
+
+/* ============================================================
+   LINEE GUIDA PRESSIONE (ESC/ESH 2018, in studio)
+   ============================================================ */
+const BP_CATS = [
+  { key: "ottimale",   label: "Ottimale",            sMax: 120, dMax: 80,  color: "#2f9e6e" },
+  { key: "normale",    label: "Normale",             sMax: 130, dMax: 85,  color: "#7cb342" },
+  { key: "normalealta",label: "Normale-alta",        sMax: 140, dMax: 90,  color: "#e0b400" },
+  { key: "grado1",     label: "Ipertensione grado 1",sMax: 160, dMax: 100, color: "#e8821a" },
+  { key: "grado2",     label: "Ipertensione grado 2",sMax: 180, dMax: 110, color: "#d4493f" },
+  { key: "grado3",     label: "Ipertensione grado 3",sMax: 999, dMax: 999, color: "#9b2c8f" },
+];
+function classifyBP(sys, dia) {
+  if (sys == null || dia == null) return null;
+  // si prende la categoria peggiore tra sistolica e diastolica
+  let idx = 0;
+  for (let i = 0; i < BP_CATS.length; i++) {
+    const c = BP_CATS[i];
+    if (sys < c.sMax || dia < c.dMax) { idx = i; break; }
+    idx = i;
+  }
+  // determina indice in base a sistolica e diastolica separatamente
+  const sIdx = BP_CATS.findIndex((c) => sys < c.sMax);
+  const dIdx = BP_CATS.findIndex((c) => dia < c.dMax);
+  const final = Math.max(sIdx === -1 ? 5 : sIdx, dIdx === -1 ? 5 : dIdx);
+  return BP_CATS[final];
+}
+
+/* ============================================================
+   GLICEMIA (a digiuno, mg/dL — orientativo)
+   ============================================================ */
+function classifyGlic(v) {
+  if (v == null) return null;
+  if (v < 100) return { label: "Normale", color: "#2f9e6e" };
+  if (v < 126) return { label: "Alterata (pre-diabete)", color: "#e0b400" };
+  return { label: "Elevata", color: "#d4493f" };
+}
+
+/* ============================================================
+   CONFIG GOOGLE SHEETS
+   Incolla qui la URL del tuo Web App (finisce con /exec)
+   ============================================================ */
+const GAS_URL = "https://script.google.com/macros/s/AKfycbzyCWbDL_cmmQ1Qx_dZxlta59BarUzHHkssfrFcqPSx5PkQ0Tciof_7t1iENA-TY2ez7w/exec";
+const SECRET = ""; // opzionale: se lo usi, deve combaciare con lo script
+
+const KEY = "salute:cache:v1";       // cache locale di fallback
+const SEED_KEY = "salute:seeded:v1"; // i seed si caricano una volta sola
+
+const SEED_RECORDS = [
+  { id: "seed-1", ts: new Date(2026, 4, 19, 21, 0).toISOString(), fascia: "sera",
+    sys: 122, dia: 85, bpm: 64, peso: 90, glic: null, sigarette: null, alcol: null,
+    note: "Da foto misuratore" },
+  { id: "seed-2", ts: new Date(2026, 4, 20, 8, 0).toISOString(), fascia: "mattina",
+    sys: 118, dia: 84, bpm: 71, peso: null, glic: null, sigarette: null, alcol: null,
+    note: "Da foto misuratore" },
+  { id: "seed-3", ts: new Date(2026, 4, 20, 21, 0).toISOString(), fascia: "sera",
+    sys: 123, dia: 78, bpm: 75, peso: null, glic: null, sigarette: null, alcol: null,
+    note: "Da foto misuratore" },
+];
+
+const isConfigured = () => GAS_URL && GAS_URL.indexOf("INCOLLA") === -1;
+function localGet(k){ try { return localStorage.getItem(k); } catch(e){ return null; } }
+function localSet(k,v){ try { localStorage.setItem(k,v); } catch(e){} }
+
+// Legge i dati: dal foglio Google se configurato, altrimenti dalla cache locale.
+async function loadRecords() {
+  if (isConfigured()) {
+    try {
+      const url = GAS_URL + "?action=list"
+        + (SECRET ? "&secret=" + encodeURIComponent(SECRET) : "");
+      const res = await fetch(url);
+      const data = await res.json();
+      if (data.ok) {
+        let records = data.records || [];
+        // Primo avvio: se il foglio è vuoto, semina le 3 misurazioni dalle foto
+        if (records.length === 0 && !localGet(SEED_KEY)) {
+          records = [...SEED_RECORDS];
+          await saveRecords(records);
+          localSet(SEED_KEY, "true");
+        }
+        localSet(KEY, JSON.stringify(records));
+        return records;
+      }
+    } catch (e) {
+      console.warn("Foglio non raggiungibile, uso la cache locale", e);
+    }
+    const cached = localGet(KEY);
+    if (cached) { try { return JSON.parse(cached); } catch (e) {} }
+    return [];
+  }
+
+  // Non configurato: modalità solo-locale
+  const cached = localGet(KEY);
+  if (cached) { try { const p = JSON.parse(cached); if (p.length) return p; } catch (e) {} }
+  if (!localGet(SEED_KEY)) {
+    localSet(KEY, JSON.stringify(SEED_RECORDS));
+    localSet(SEED_KEY, "true");
+    return [...SEED_RECORDS];
+  }
+  return [];
+}
+
+// Salva l'elenco completo: sul foglio Google (se configurato) + sempre in cache locale.
+async function saveRecords(records) {
+  localSet(KEY, JSON.stringify(records));
+  if (!isConfigured()) return true;
+  try {
+    // text/plain evita il preflight CORS verso Apps Script
+    await fetch(GAS_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ action: "save", secret: SECRET, records }),
+    });
+    return true;
+  } catch (e) {
+    console.error("Salvataggio sul foglio fallito (resta in cache locale)", e);
+    return false;
+  }
+}
+
+/* ============================================================
+   UTIL
+   ============================================================ */
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+const num = (v) => (v === "" || v == null || isNaN(Number(v)) ? null : Number(v));
+const fmtDate = (iso) => {
+  const d = new Date(iso);
+  return d.toLocaleDateString("it-IT", { day: "2-digit", month: "2-digit", year: "2-digit" });
+};
+const fmtDateTime = (iso) => {
+  const d = new Date(iso);
+  return d.toLocaleString("it-IT", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+};
+const todayLocalISO = () => {
+  const d = new Date();
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return d.toISOString().slice(0, 16);
+};
+
+// regressione lineare semplice -> { m, b }
+function linReg(points) {
+  const n = points.length;
+  if (n < 2) return null;
+  let sx = 0, sy = 0, sxy = 0, sxx = 0;
+  for (const [x, y] of points) { sx += x; sy += y; sxy += x * y; sxx += x * x; }
+  const denom = n * sxx - sx * sx;
+  if (denom === 0) return null;
+  const m = (n * sxy - sx * sy) / denom;
+  const b = (sy - m * sx) / n;
+  return { m, b };
+}
+
+/* ============================================================
+   COMPONENTE PRINCIPALE
+   ============================================================ */
+function SaluteDashboard() {
+  const [records, setRecords] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [tab, setTab] = useState("dashboard"); // dashboard | inserisci | dati
+  const [range, setRange] = useState("90"); // giorni, "all"
+  const [toast, setToast] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      const r = await loadRecords();
+      setRecords(r.sort((a, b) => new Date(a.ts) - new Date(b.ts)));
+      setLoading(false);
+    })();
+  }, []);
+
+  const persist = useCallback(async (next) => {
+    const sorted = [...next].sort((a, b) => new Date(a.ts) - new Date(b.ts));
+    setRecords(sorted);
+    const ok = await saveRecords(sorted);
+    setToast(ok ? "Salvato" : "Salvato in locale (foglio non raggiungibile)");
+    setTimeout(() => setToast(null), 2000);
+  }, []);
+
+  const addRecord = useCallback((rec) => persist([...records, rec]), [records, persist]);
+  const deleteRecord = useCallback((id) => persist(records.filter((r) => r.id !== id)), [records, persist]);
+
+  /* ---- filtro per range temporale ---- */
+  const filtered = useMemo(() => {
+    if (range === "all") return records;
+    const days = Number(range);
+    const cutoff = Date.now() - days * 86400000;
+    return records.filter((r) => new Date(r.ts).getTime() >= cutoff);
+  }, [records, range]);
+
+  if (loading) {
+    return <div style={S.shell}><div style={S.loading}>Caricamento…</div></div>;
+  }
+
+  return (
+    <div style={S.shell}>
+      <style>{CSS}</style>
+      <Header age={eta()} count={records.length} configured={isConfigured()} />
+
+      <nav style={S.tabs}>
+        {[
+          ["dashboard", "Andamento"],
+          ["inserisci", "Inserisci dato"],
+          ["dati", "Tabella & Export"],
+        ].map(([k, label]) => (
+          <button key={k} onClick={() => setTab(k)}
+            style={{ ...S.tab, ...(tab === k ? S.tabActive : {}) }}>
+            {label}
+          </button>
+        ))}
+      </nav>
+
+      {tab === "dashboard" && (
+        <Dashboard records={records} filtered={filtered} range={range} setRange={setRange} />
+      )}
+      {tab === "inserisci" && (
+        <InserisciForm onAdd={addRecord} />
+      )}
+      {tab === "dati" && (
+        <TabellaDati records={records} onDelete={deleteRecord} />
+      )}
+
+      {toast && <div style={S.toast}>{toast}</div>}
+      <Disclaimer />
+    </div>
+  );
+}
+
+/* ============================================================
+   HEADER
+   ============================================================ */
+function Header({ age, count, configured }) {
+  return (
+    <header style={S.header}>
+      <div>
+        <div style={S.kicker}>Monitoraggio salute</div>
+        <h1 style={S.h1}>Pressione &amp; benessere</h1>
+      </div>
+      <div style={S.profileChips}>
+        <span style={S.chip}>♂ {age} anni</span>
+        <span style={S.chip}>{PROFILE.altezzaCm} cm</span>
+        <span style={S.chip}>{count} misurazioni</span>
+        <span style={{ ...S.chip, color: configured ? "#2f9e6e" : "#b0843b", borderColor: configured ? "#bfe3d0" : "#e7d4a8" }}>
+          {configured ? "☁ sincronizzato" : "⚠ solo locale"}
+        </span>
+      </div>
+    </header>
+  );
+}
+
+/* ============================================================
+   DASHBOARD
+   ============================================================ */
+function Dashboard({ records, filtered, range, setRange }) {
+  const bp = filtered.filter((r) => r.sys != null && r.dia != null);
+  const lastBP = [...bp].reverse()[0];
+  const lastCat = lastBP ? classifyBP(lastBP.sys, lastBP.dia) : null;
+
+  // medie ultime 7 misurazioni pressione
+  const last7 = bp.slice(-7);
+  const avg = (arr, k) => arr.length ? Math.round(arr.reduce((s, r) => s + r[k], 0) / arr.length) : null;
+
+  // dati per grafico pressione
+  const bpChart = bp.map((r) => ({
+    ts: new Date(r.ts).getTime(),
+    label: fmtDate(r.ts),
+    sys: r.sys, dia: r.dia, bpm: r.bpm,
+  }));
+
+  // media mobile a 5 punti su sistolica
+  const withMA = bpChart.map((p, i, arr) => {
+    const win = arr.slice(Math.max(0, i - 4), i + 1);
+    return { ...p, sysMA: Math.round(win.reduce((s, x) => s + x.sys, 0) / win.length) };
+  });
+
+  // previsione lineare 14 giorni su sistolica e diastolica
+  const forecast = useMemo(() => buildForecast(bp), [bp]);
+  const bpChartWithForecast = useMemo(() => {
+    if (!forecast) return withMA;
+    return [...withMA, ...forecast.points];
+  }, [withMA, forecast]);
+
+  // peso
+  const wRecords = filtered.filter((r) => r.peso != null);
+  const lastW = [...wRecords].reverse()[0];
+  const bmi = lastW ? +(lastW.peso / Math.pow(PROFILE.altezzaCm / 100, 2)).toFixed(1) : null;
+  const wChart = wRecords.map((r) => ({ label: fmtDate(r.ts), peso: r.peso }));
+
+  // glicemia
+  const gRecords = filtered.filter((r) => r.glic != null);
+  const lastG = [...gRecords].reverse()[0];
+  const gChart = gRecords.map((r) => ({ label: fmtDate(r.ts), glic: r.glic }));
+
+  // abitudini per giorno
+  const habits = useMemo(() => aggregateHabits(filtered), [filtered]);
+
+  if (records.length === 0) {
+    return (
+      <div style={S.card}>
+        <p style={{ margin: 0, color: "var(--ink-soft)" }}>
+          Nessun dato ancora. Vai su <strong>Inserisci dato</strong> per cominciare,
+          oppure caricami una foto dello schermo del misuratore e li inserisco io.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div style={S.dashGrid}>
+      {/* RANGE SELECTOR */}
+      <div style={S.rangeRow}>
+        {[["30", "30g"], ["90", "90g"], ["365", "1 anno"], ["all", "Tutto"]].map(([k, l]) => (
+          <button key={k} onClick={() => setRange(k)}
+            style={{ ...S.rangeBtn, ...(range === k ? S.rangeBtnActive : {}) }}>{l}</button>
+        ))}
+      </div>
+
+      {/* KPI CARDS */}
+      <div style={S.kpiGrid}>
+        <KpiBP last={lastBP} cat={lastCat} avgS={avg(last7, "sys")} avgD={avg(last7, "dia")} />
+        <Kpi title="Battito" value={lastBP?.bpm ?? "—"} unit="bpm"
+          sub={last7.length ? `media 7: ${avg(last7, "bpm") ?? "—"}` : ""} accent="#3b6fb0" />
+        <Kpi title="Peso" value={lastW?.peso ?? "—"} unit="kg"
+          sub={bmi ? `BMI ${bmi} · ${bmiLabel(bmi)}` : "—"} accent="#7d5ba6" />
+        <Kpi title="Glicemia" value={lastG?.glic ?? "—"} unit="mg/dL"
+          sub={lastG ? classifyGlic(lastG.glic)?.label : "—"}
+          accent={lastG ? classifyGlic(lastG.glic)?.color : "#888"} />
+      </div>
+
+      {/* GRAFICO PRESSIONE */}
+      <div style={S.card}>
+        <CardHead title="Pressione arteriosa" sub="Sistolica / diastolica con bande di riferimento e previsione a 14 giorni" />
+        {bp.length === 0 ? <Empty /> : (
+          <ResponsiveContainer width="100%" height={340}>
+            <ComposedChart data={bpChartWithForecast} margin={{ top: 8, right: 12, left: -8, bottom: 4 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--grid)" />
+              {/* bande di riferimento sistolica */}
+              <ReferenceArea y1={0} y2={120} fill="#2f9e6e" fillOpacity={0.06} />
+              <ReferenceArea y1={120} y2={140} fill="#e0b400" fillOpacity={0.07} />
+              <ReferenceArea y1={140} y2={160} fill="#e8821a" fillOpacity={0.08} />
+              <ReferenceArea y1={160} y2={300} fill="#d4493f" fillOpacity={0.08} />
+              <ReferenceLine y={140} stroke="#e8821a" strokeDasharray="4 4" strokeOpacity={0.6} />
+              <ReferenceLine y={90} stroke="#3b6fb0" strokeDasharray="4 4" strokeOpacity={0.4} />
+              <XAxis dataKey="label" tick={{ fontSize: 11, fill: "var(--ink-soft)" }} minTickGap={24} />
+              <YAxis domain={[50, "dataMax + 10"]} tick={{ fontSize: 11, fill: "var(--ink-soft)" }} />
+              <Tooltip content={<BPTooltip />} />
+              <Line type="monotone" dataKey="sys" name="Sistolica" stroke="#d4493f" strokeWidth={2.2} dot={{ r: 2.5 }} connectNulls />
+              <Line type="monotone" dataKey="dia" name="Diastolica" stroke="#3b6fb0" strokeWidth={2.2} dot={{ r: 2.5 }} connectNulls />
+              <Line type="monotone" dataKey="sysMA" name="Media mobile (sist.)" stroke="#9b2c8f" strokeWidth={1.6} strokeDasharray="5 4" dot={false} connectNulls />
+              <Line type="monotone" dataKey="sysForecast" name="Previsione sist." stroke="#d4493f" strokeWidth={1.6} strokeDasharray="2 4" dot={false} connectNulls />
+              <Line type="monotone" dataKey="diaForecast" name="Previsione diast." stroke="#3b6fb0" strokeWidth={1.6} strokeDasharray="2 4" dot={false} connectNulls />
+            </ComposedChart>
+          </ResponsiveContainer>
+        )}
+        {forecast && (
+          <p style={S.forecastNote}>
+            Tendenza sistolica: <strong style={{ color: forecast.trendS > 0 ? "#d4493f" : "#2f9e6e" }}>
+              {forecast.trendS > 0 ? "▲" : "▼"} {Math.abs(forecast.trendS).toFixed(1)} mmHg/settimana
+            </strong>. Stima a 14 giorni puramente statistica (regressione lineare), indicativa.
+          </p>
+        )}
+      </div>
+
+      {/* GRAFICO BATTITO */}
+      {bp.some((r) => r.bpm != null) && (
+        <div style={S.card}>
+          <CardHead title="Frequenza cardiaca" sub="Battiti per minuto a riposo" />
+          <ResponsiveContainer width="100%" height={200}>
+            <LineChart data={bpChart} margin={{ top: 8, right: 12, left: -8, bottom: 4 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--grid)" />
+              <ReferenceArea y1={60} y2={100} fill="#3b6fb0" fillOpacity={0.05} />
+              <XAxis dataKey="label" tick={{ fontSize: 11, fill: "var(--ink-soft)" }} minTickGap={24} />
+              <YAxis domain={["dataMin - 5", "dataMax + 5"]} tick={{ fontSize: 11, fill: "var(--ink-soft)" }} />
+              <Tooltip />
+              <Line type="monotone" dataKey="bpm" name="Battito" stroke="#3b6fb0" strokeWidth={2} dot={{ r: 2 }} connectNulls />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
+      {/* PESO + GLICEMIA affiancati */}
+      <div style={S.twoCol}>
+        {wChart.length > 0 && (
+          <div style={S.card}>
+            <CardHead title="Peso" sub={`Altezza ${PROFILE.altezzaCm} cm`} />
+            <ResponsiveContainer width="100%" height={200}>
+              <AreaChart data={wChart} />
+            </ResponsiveContainer>
+          </div>
+        )}
+        {gChart.length > 0 && (
+          <div style={S.card}>
+            <CardHead title="Glicemia" sub="mg/dL · a digiuno orientativo" />
+            <ResponsiveContainer width="100%" height={200}>
+              <ComposedChart data={gChart} margin={{ top: 8, right: 12, left: -8, bottom: 4 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--grid)" />
+                <ReferenceArea y1={0} y2={100} fill="#2f9e6e" fillOpacity={0.06} />
+                <ReferenceArea y1={100} y2={126} fill="#e0b400" fillOpacity={0.08} />
+                <ReferenceArea y1={126} y2={400} fill="#d4493f" fillOpacity={0.07} />
+                <ReferenceLine y={100} stroke="#e0b400" strokeDasharray="4 4" />
+                <ReferenceLine y={126} stroke="#d4493f" strokeDasharray="4 4" />
+                <XAxis dataKey="label" tick={{ fontSize: 11, fill: "var(--ink-soft)" }} minTickGap={24} />
+                <YAxis domain={[60, "dataMax + 20"]} tick={{ fontSize: 11, fill: "var(--ink-soft)" }} />
+                <Tooltip />
+                <Line type="monotone" dataKey="glic" name="Glicemia" stroke="#7d5ba6" strokeWidth={2} dot={{ r: 2.5 }} connectNulls />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
+
+      {/* ABITUDINI */}
+      {habits.length > 0 && (
+        <div style={S.card}>
+          <CardHead title="Abitudini" sub="Sigarette e unità alcoliche per giorno" />
+          <ResponsiveContainer width="100%" height={200}>
+            <BarChart data={habits} margin={{ top: 8, right: 12, left: -8, bottom: 4 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--grid)" />
+              <XAxis dataKey="label" tick={{ fontSize: 11, fill: "var(--ink-soft)" }} minTickGap={24} />
+              <YAxis tick={{ fontSize: 11, fill: "var(--ink-soft)" }} />
+              <Tooltip />
+              <Bar dataKey="sigarette" name="Sigarette" fill="#9b6a4a" radius={[3, 3, 0, 0]} />
+              <Bar dataKey="alcol" name="Unità alcoliche" fill="#b0843b" radius={[3, 3, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* area chart peso separato per usare gradient */
+function AreaChart({ data }) {
+  return (
+    <ComposedChart data={data} margin={{ top: 8, right: 12, left: -8, bottom: 4 }}>
+      <defs>
+        <linearGradient id="wfill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#7d5ba6" stopOpacity={0.35} />
+          <stop offset="100%" stopColor="#7d5ba6" stopOpacity={0.02} />
+        </linearGradient>
+      </defs>
+      <CartesianGrid strokeDasharray="3 3" stroke="var(--grid)" />
+      <XAxis dataKey="label" tick={{ fontSize: 11, fill: "var(--ink-soft)" }} minTickGap={24} />
+      <YAxis domain={["dataMin - 2", "dataMax + 2"]} tick={{ fontSize: 11, fill: "var(--ink-soft)" }} />
+      <Tooltip />
+      <Area type="monotone" dataKey="peso" name="Peso (kg)" stroke="#7d5ba6" strokeWidth={2} fill="url(#wfill)" connectNulls />
+    </ComposedChart>
+  );
+}
+
+/* ---- previsione ---- */
+function buildForecast(bp) {
+  if (bp.length < 4) return null;
+  const t0 = new Date(bp[0].ts).getTime();
+  const day = 86400000;
+  const sPoints = bp.map((r) => [(new Date(r.ts).getTime() - t0) / day, r.sys]);
+  const dPoints = bp.map((r) => [(new Date(r.ts).getTime() - t0) / day, r.dia]);
+  const sReg = linReg(sPoints);
+  const dReg = linReg(dPoints);
+  if (!sReg || !dReg) return null;
+  const lastDay = sPoints[sPoints.length - 1][0];
+  const points = [];
+  for (let d = 1; d <= 14; d += 2) {
+    const x = lastDay + d;
+    const ts = t0 + x * day;
+    points.push({
+      ts, label: fmtDate(new Date(ts).toISOString()),
+      sysForecast: Math.round(sReg.m * x + sReg.b),
+      diaForecast: Math.round(dReg.m * x + dReg.b),
+    });
+  }
+  // collega la previsione all'ultimo punto reale
+  points.unshift({
+    ts: t0 + lastDay * day,
+    label: fmtDate(new Date(t0 + lastDay * day).toISOString()),
+    sysForecast: Math.round(sReg.m * lastDay + sReg.b),
+    diaForecast: Math.round(dReg.m * lastDay + dReg.b),
+  });
+  return { points, trendS: sReg.m * 7, trendD: dReg.m * 7 };
+}
+
+function aggregateHabits(records) {
+  const byDay = {};
+  for (const r of records) {
+    if (r.sigarette == null && r.alcol == null) continue;
+    const day = new Date(r.ts).toISOString().slice(0, 10);
+    if (!byDay[day]) byDay[day] = { label: fmtDate(r.ts), sigarette: 0, alcol: 0, has: false };
+    if (r.sigarette != null) { byDay[day].sigarette += r.sigarette; byDay[day].has = true; }
+    if (r.alcol != null) { byDay[day].alcol += r.alcol; byDay[day].has = true; }
+  }
+  return Object.values(byDay).filter((d) => d.has);
+}
+
+function bmiLabel(bmi) {
+  if (bmi < 18.5) return "sottopeso";
+  if (bmi < 25) return "normopeso";
+  if (bmi < 30) return "sovrappeso";
+  return "obesità";
+}
+
+/* ============================================================
+   KPI
+   ============================================================ */
+function KpiBP({ last, cat, avgS, avgD }) {
+  return (
+    <div style={{ ...S.kpi, borderTopColor: cat?.color || "#888" }}>
+      <div style={S.kpiTitle}>Pressione</div>
+      <div style={S.kpiValue}>
+        {last ? `${last.sys}/${last.dia}` : "—"}<span style={S.kpiUnit}> mmHg</span>
+      </div>
+      {cat && <div style={{ ...S.kpiBadge, background: cat.color }}>{cat.label}</div>}
+      <div style={S.kpiSub}>{avgS ? `media 7: ${avgS}/${avgD}` : ""}</div>
+    </div>
+  );
+}
+function Kpi({ title, value, unit, sub, accent }) {
+  return (
+    <div style={{ ...S.kpi, borderTopColor: accent }}>
+      <div style={S.kpiTitle}>{title}</div>
+      <div style={S.kpiValue}>{value}<span style={S.kpiUnit}> {unit}</span></div>
+      <div style={S.kpiSub}>{sub}</div>
+    </div>
+  );
+}
+
+function CardHead({ title, sub }) {
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <h3 style={S.cardTitle}>{title}</h3>
+      {sub && <p style={S.cardSub}>{sub}</p>}
+    </div>
+  );
+}
+function Empty() {
+  return <p style={{ color: "var(--ink-soft)", fontSize: 13, margin: "8px 0" }}>Dati insufficienti.</p>;
+}
+
+function BPTooltip({ active, payload, label }) {
+  if (!active || !payload || !payload.length) return null;
+  const d = payload[0].payload;
+  const cat = d.sys && d.dia ? classifyBP(d.sys, d.dia) : null;
+  return (
+    <div style={S.tooltip}>
+      <div style={{ fontWeight: 600, marginBottom: 4 }}>{label}</div>
+      {d.sys != null && <div>Sistolica: <strong>{d.sys}</strong></div>}
+      {d.dia != null && <div>Diastolica: <strong>{d.dia}</strong></div>}
+      {d.bpm != null && <div>Battito: <strong>{d.bpm}</strong></div>}
+      {d.sysForecast != null && <div style={{ color: "#888" }}>Previsione: {d.sysForecast}/{d.diaForecast}</div>}
+      {cat && <div style={{ marginTop: 4, color: cat.color, fontWeight: 600 }}>{cat.label}</div>}
+    </div>
+  );
+}
+
+/* ============================================================
+   FORM INSERIMENTO
+   ============================================================ */
+function InserisciForm({ onAdd }) {
+  const empty = {
+    ts: todayLocalISO(), fascia: "mattina",
+    sys: "", dia: "", bpm: "", peso: "", glic: "", sigarette: "", alcol: "", note: "",
+  };
+  const [f, setF] = useState(empty);
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+
+  const submit = () => {
+    const rec = {
+      id: uid(), ts: new Date(f.ts).toISOString(), fascia: f.fascia,
+      sys: num(f.sys), dia: num(f.dia), bpm: num(f.bpm),
+      peso: num(f.peso), glic: num(f.glic),
+      sigarette: num(f.sigarette), alcol: num(f.alcol),
+      note: f.note.trim() || null,
+    };
+    if (rec.sys == null && rec.dia == null && rec.peso == null && rec.glic == null
+        && rec.sigarette == null && rec.alcol == null) return;
+    onAdd(rec);
+    setF({ ...empty, ts: todayLocalISO() });
+  };
+
+  const preview = num(f.sys) && num(f.dia) ? classifyBP(num(f.sys), num(f.dia)) : null;
+
+  return (
+    <div style={S.card}>
+      <CardHead title="Nuova misurazione" sub="Compila solo i campi che ti servono. Data e fascia oraria aiutano i confronti mattina/sera." />
+      <div style={S.formGrid}>
+        <Field label="Data e ora">
+          <input type="datetime-local" value={f.ts} onChange={set("ts")} style={S.input} />
+        </Field>
+        <Field label="Fascia">
+          <select value={f.fascia} onChange={set("fascia")} style={S.input}>
+            <option value="mattina">Mattina</option>
+            <option value="sera">Sera</option>
+            <option value="altro">Altro</option>
+          </select>
+        </Field>
+        <Field label="Sistolica (mmHg)"><input inputMode="numeric" value={f.sys} onChange={set("sys")} style={S.input} placeholder="es. 135" /></Field>
+        <Field label="Diastolica (mmHg)"><input inputMode="numeric" value={f.dia} onChange={set("dia")} style={S.input} placeholder="es. 85" /></Field>
+        <Field label="Battito (bpm)"><input inputMode="numeric" value={f.bpm} onChange={set("bpm")} style={S.input} placeholder="es. 72" /></Field>
+        <Field label="Peso (kg)"><input inputMode="decimal" value={f.peso} onChange={set("peso")} style={S.input} placeholder="es. 90" /></Field>
+        <Field label="Glicemia (mg/dL)"><input inputMode="numeric" value={f.glic} onChange={set("glic")} style={S.input} placeholder="es. 95" /></Field>
+        <Field label="Sigarette (n°)"><input inputMode="numeric" value={f.sigarette} onChange={set("sigarette")} style={S.input} placeholder="es. 5" /></Field>
+        <Field label="Unità alcoliche"><input inputMode="decimal" value={f.alcol} onChange={set("alcol")} style={S.input} placeholder="es. 2" /></Field>
+        <Field label="Note" full><input value={f.note} onChange={set("note")} style={S.input} placeholder="contesto, sintomi, farmaci…" /></Field>
+      </div>
+
+      {preview && (
+        <div style={{ ...S.previewBadge, background: preview.color }}>
+          Pressione inserita → {preview.label}
+        </div>
+      )}
+
+      <button onClick={submit} style={S.primaryBtn}>Aggiungi misurazione</button>
+
+      <div style={S.hint}>
+        💡 Una <strong>unità alcolica</strong> ≈ un bicchiere di vino (125 ml) o una birra piccola (330 ml).
+        Per le foto del misuratore: caricale in chat e le trascrivo io qui.
+      </div>
+    </div>
+  );
+}
+function Field({ label, children, full }) {
+  return (
+    <label style={{ ...S.field, ...(full ? { gridColumn: "1 / -1" } : {}) }}>
+      <span style={S.fieldLabel}>{label}</span>
+      {children}
+    </label>
+  );
+}
+
+/* ============================================================
+   TABELLA + EXPORT
+   ============================================================ */
+function TabellaDati({ records, onDelete }) {
+  const rev = [...records].reverse();
+
+  const exportCSV = () => {
+    const head = ["data_ora", "fascia", "sistolica", "diastolica", "battito", "peso", "glicemia", "sigarette", "alcol", "note"];
+    const rows = records.map((r) => [
+      r.ts, r.fascia ?? "", r.sys ?? "", r.dia ?? "", r.bpm ?? "",
+      r.peso ?? "", r.glic ?? "", r.sigarette ?? "", r.alcol ?? "",
+      (r.note ?? "").replace(/"/g, '""'),
+    ].map((v) => `"${v}"`).join(","));
+    const csv = [head.join(","), ...rows].join("\n");
+    download(csv, "salute_export.csv", "text/csv;charset=utf-8");
+  };
+
+  const exportXLS = () => {
+    // SpreadsheetML semplice apribile da Excel
+    const head = ["data_ora", "fascia", "sistolica", "diastolica", "battito", "peso", "glicemia", "sigarette", "alcol", "note"];
+    const esc = (v) => String(v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const cell = (v) => `<Cell><Data ss:Type="String">${esc(v ?? "")}</Data></Cell>`;
+    const row = (cells) => `<Row>${cells.map(cell).join("")}</Row>`;
+    const body = records.map((r) => row([r.ts, r.fascia, r.sys, r.dia, r.bpm, r.peso, r.glic, r.sigarette, r.alcol, r.note])).join("");
+    const xml = `<?xml version="1.0"?><?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+<Worksheet ss:Name="Salute"><Table>${row(head)}${body}</Table></Worksheet></Workbook>`;
+    download(xml, "salute_export.xls", "application/vnd.ms-excel");
+  };
+
+  return (
+    <div style={S.card}>
+      <div style={S.exportRow}>
+        <CardHead title="Tutte le misurazioni" sub={`${records.length} record salvati`} />
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={exportCSV} style={S.ghostBtn} disabled={!records.length}>↓ CSV</button>
+          <button onClick={exportXLS} style={S.ghostBtn} disabled={!records.length}>↓ Excel</button>
+        </div>
+      </div>
+      {records.length === 0 ? <Empty /> : (
+        <div style={{ overflowX: "auto" }}>
+          <table style={S.table}>
+            <thead>
+              <tr>
+                {["Data", "Fascia", "Pressione", "Bpm", "Peso", "Glic.", "Sig.", "Alcol", ""].map((h) => (
+                  <th key={h} style={S.th}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rev.map((r) => {
+                const cat = r.sys && r.dia ? classifyBP(r.sys, r.dia) : null;
+                return (
+                  <tr key={r.id}>
+                    <td style={S.td}>{fmtDateTime(r.ts)}</td>
+                    <td style={S.td}>{r.fascia ?? "—"}</td>
+                    <td style={S.td}>
+                      {r.sys != null ? (
+                        <span style={{ color: cat?.color, fontWeight: 600 }}>{r.sys}/{r.dia}</span>
+                      ) : "—"}
+                    </td>
+                    <td style={S.td}>{r.bpm ?? "—"}</td>
+                    <td style={S.td}>{r.peso ?? "—"}</td>
+                    <td style={S.td}>{r.glic ?? "—"}</td>
+                    <td style={S.td}>{r.sigarette ?? "—"}</td>
+                    <td style={S.td}>{r.alcol ?? "—"}</td>
+                    <td style={S.td}>
+                      <button onClick={() => onDelete(r.id)} style={S.delBtn} title="Elimina">✕</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function download(content, filename, mime) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a); URL.revokeObjectURL(url);
+}
+
+function Disclaimer() {
+  return (
+    <p style={S.disclaimer}>
+      ⚕️ Strumento di monitoraggio personale, non un dispositivo medico. Le classificazioni seguono criteri
+      generali (ESC/ESH) e non sostituiscono la valutazione del medico. In caso di valori molto alti
+      (≥180/110) o sintomi, contatta un medico.
+    </p>
+  );
+}
+
+/* ============================================================
+   STILI
+   ============================================================ */
+const CSS = `
+  @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Spline+Sans:wght@400;500;600&display=swap');
+  * { box-sizing: border-box; }
+  input, select, button { font-family: inherit; }
+  input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 0; }
+  table { border-collapse: collapse; }
+  ::-webkit-scrollbar { height: 8px; width: 8px; }
+  ::-webkit-scrollbar-thumb { background: #cbd2cc; border-radius: 4px; }
+`;
+const S = {
+  shell: {
+    "--bg": "#f4f6f3", "--paper": "#ffffff", "--ink": "#1f2a24", "--ink-soft": "#5e6b62",
+    "--grid": "#e7ebe6", "--accent": "#2f9e6e", "--line": "#e2e7e0",
+    background: "var(--bg)", color: "var(--ink)", minHeight: "100%",
+    fontFamily: "'Spline Sans', system-ui, sans-serif",
+    padding: "20px clamp(12px, 4vw, 36px)", maxWidth: 1100, margin: "0 auto",
+  },
+  loading: { padding: 60, textAlign: "center", color: "#5e6b62" },
+  header: { display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 12, marginBottom: 18 },
+  kicker: { fontSize: 12, letterSpacing: 1.5, textTransform: "uppercase", color: "var(--ink-soft)", fontWeight: 600 },
+  h1: { fontFamily: "'Fraunces', serif", fontSize: "clamp(26px, 5vw, 38px)", fontWeight: 600, margin: "2px 0 0", lineHeight: 1.05 },
+  profileChips: { display: "flex", gap: 8, flexWrap: "wrap" },
+  chip: { background: "var(--paper)", border: "1px solid var(--line)", borderRadius: 20, padding: "5px 12px", fontSize: 13, color: "var(--ink-soft)" },
+  tabs: { display: "flex", gap: 4, background: "#e9ede8", padding: 4, borderRadius: 12, marginBottom: 18, flexWrap: "wrap" },
+  tab: { flex: 1, minWidth: 110, border: "none", background: "transparent", padding: "10px 14px", borderRadius: 9, fontSize: 14, fontWeight: 500, color: "var(--ink-soft)", cursor: "pointer" },
+  tabActive: { background: "var(--paper)", color: "var(--ink)", boxShadow: "0 1px 3px rgba(0,0,0,.08)" },
+  dashGrid: { display: "flex", flexDirection: "column", gap: 16 },
+  rangeRow: { display: "flex", gap: 6, justifyContent: "flex-end" },
+  rangeBtn: { border: "1px solid var(--line)", background: "var(--paper)", padding: "6px 12px", borderRadius: 8, fontSize: 13, color: "var(--ink-soft)", cursor: "pointer" },
+  rangeBtnActive: { background: "var(--ink)", color: "#fff", borderColor: "var(--ink)" },
+  kpiGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12 },
+  kpi: { background: "var(--paper)", borderRadius: 14, padding: "14px 16px", borderTop: "3px solid #888", boxShadow: "0 1px 3px rgba(20,40,30,.05)" },
+  kpiTitle: { fontSize: 12, textTransform: "uppercase", letterSpacing: 0.8, color: "var(--ink-soft)", fontWeight: 600 },
+  kpiValue: { fontFamily: "'Fraunces', serif", fontSize: 30, fontWeight: 600, lineHeight: 1.1, marginTop: 4 },
+  kpiUnit: { fontSize: 13, color: "var(--ink-soft)", fontFamily: "'Spline Sans', sans-serif", fontWeight: 400 },
+  kpiBadge: { display: "inline-block", color: "#fff", fontSize: 11, fontWeight: 600, padding: "2px 8px", borderRadius: 6, marginTop: 6 },
+  kpiSub: { fontSize: 12, color: "var(--ink-soft)", marginTop: 6 },
+  card: { background: "var(--paper)", borderRadius: 16, padding: "18px 18px 16px", boxShadow: "0 1px 3px rgba(20,40,30,.05)", border: "1px solid var(--line)" },
+  cardTitle: { fontFamily: "'Fraunces', serif", fontSize: 18, fontWeight: 600, margin: 0 },
+  cardSub: { fontSize: 12.5, color: "var(--ink-soft)", margin: "3px 0 0" },
+  twoCol: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16 },
+  forecastNote: { fontSize: 12.5, color: "var(--ink-soft)", margin: "10px 0 0", lineHeight: 1.5 },
+  formGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 14 },
+  field: { display: "flex", flexDirection: "column", gap: 5 },
+  fieldLabel: { fontSize: 12.5, color: "var(--ink-soft)", fontWeight: 500 },
+  input: { border: "1px solid var(--line)", borderRadius: 9, padding: "9px 11px", fontSize: 14.5, background: "#fcfdfb", color: "var(--ink)", width: "100%" },
+  previewBadge: { display: "inline-block", color: "#fff", fontWeight: 600, fontSize: 13, padding: "6px 12px", borderRadius: 8, marginBottom: 12 },
+  primaryBtn: { background: "var(--accent)", color: "#fff", border: "none", borderRadius: 10, padding: "12px 22px", fontSize: 15, fontWeight: 600, cursor: "pointer", width: "100%" },
+  hint: { fontSize: 12.5, color: "var(--ink-soft)", marginTop: 14, lineHeight: 1.5, background: "#f0f4ef", padding: "10px 12px", borderRadius: 10 },
+  exportRow: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap", marginBottom: 8 },
+  ghostBtn: { border: "1px solid var(--line)", background: "var(--paper)", padding: "8px 14px", borderRadius: 8, fontSize: 13.5, fontWeight: 600, color: "var(--ink)", cursor: "pointer" },
+  table: { width: "100%", fontSize: 13.5 },
+  th: { textAlign: "left", padding: "8px 10px", borderBottom: "2px solid var(--line)", color: "var(--ink-soft)", fontWeight: 600, whiteSpace: "nowrap", fontSize: 12 },
+  td: { padding: "8px 10px", borderBottom: "1px solid var(--grid)", whiteSpace: "nowrap" },
+  delBtn: { border: "none", background: "transparent", color: "#c0392b", cursor: "pointer", fontSize: 14, padding: 4 },
+  tooltip: { background: "#fff", border: "1px solid var(--line)", borderRadius: 8, padding: "8px 12px", fontSize: 13, boxShadow: "0 4px 12px rgba(0,0,0,.1)" },
+  toast: { position: "fixed", bottom: 20, left: "50%", transform: "translateX(-50%)", background: "var(--ink)", color: "#fff", padding: "10px 20px", borderRadius: 24, fontSize: 14, zIndex: 50, boxShadow: "0 4px 16px rgba(0,0,0,.2)" },
+  disclaimer: { fontSize: 11.5, color: "var(--ink-soft)", lineHeight: 1.5, marginTop: 22, paddingTop: 14, borderTop: "1px solid var(--line)" },
+};
+
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<SaluteDashboard />);
+</script>
+</body>
+</html>
